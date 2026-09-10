@@ -1,0 +1,5 @@
+# Build
+
+```bash
+pio run
+```
