@@ -1,108 +1,135 @@
 #include <Arduino.h>
-#include <WiFi.h>
-
-#include "secrets.h"
+#include <driver/ledc.h>
+#include <esp_system.h>
 
 namespace {
-constexpr uint8_t LED_PIN = 8;
-constexpr uint8_t LED_ON = LOW;
-constexpr uint8_t LED_OFF = HIGH;
+constexpr uint8_t SERVO_PIN = 4;
+constexpr uint32_t SERVO_FREQUENCY_HZ = 50;
+constexpr uint32_t PWM_MAX = (1UL << 14) - 1;
+constexpr uint32_t JAW_OPEN_PULSE_US = 1200;
+constexpr uint32_t CENTER_PULSE_US = 1500;
+constexpr uint32_t JAW_CLOSED_PULSE_US = 1600;
 
-constexpr unsigned long FAST_BLINK_INTERVAL_MS = 150;
-constexpr unsigned long SLOW_BLINK_INTERVAL_MS = 600;
-constexpr unsigned long BLINK_MODE_DURATION_MS = 3000;
-constexpr unsigned long LOG_INTERVAL_MS = 3000;
-constexpr unsigned long WIFI_RETRY_INTERVAL_MS = 10000;
+constexpr uint8_t INCREASE_PIN = 5;
+constexpr uint8_t DECREASE_PIN = 6;
+constexpr unsigned long DEBOUNCE_MS = 30;
+constexpr int STEP_US = 50;
 
-bool led_is_on = false;
-bool fast_blink_mode = true;
-unsigned long last_led_toggle_ms = 0;
-unsigned long last_mode_change_ms = 0;
-unsigned long last_log_ms = 0;
-unsigned long last_wifi_attempt_ms = 0;
+struct Button {
+    uint8_t pin;
+    bool raw_pressed = false;
+    bool pressed = false;
+    unsigned long changed_ms = 0;
 
-void start_wifi_connection() {
-    last_wifi_attempt_ms = millis();
-    Serial.printf("[WiFi] Connecting to %s\n", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-}
+    bool update(unsigned long now) {
+        const bool reading = digitalRead(pin) == LOW;
+        if (reading != raw_pressed) {
+            raw_pressed = reading;
+            changed_ms = now;
+        }
+        if (pressed != raw_pressed && now - changed_ms >= DEBOUNCE_MS) {
+            pressed = raw_pressed;
+            return pressed;
+        }
+        return false;
+    }
+};
 
-void update_wifi(unsigned long now) {
-    if (WiFi.status() == WL_CONNECTED) {
-        return;
+Button increase_button{INCREASE_PIN};
+Button decrease_button{DECREASE_PIN};
+
+uint32_t pulse_us = CENTER_PULSE_US;
+bool pwm_ready = false;
+
+
+bool wait_for_release = true;
+
+bool write_pulse() {
+    const uint32_t duty = (pulse_us * PWM_MAX + 10000UL) / 20000UL;
+    const esp_err_t set_result = ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+    const esp_err_t update_result = set_result == ESP_OK
+        ? ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0) : set_result;
+    if (update_result != ESP_OK) {
+        ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+        pwm_ready = false;
+        Serial.printf("[ERROR] PWM failed: %d. Restart to retry.\n", update_result);
+        return false;
     }
 
-    if (now - last_wifi_attempt_ms >= WIFI_RETRY_INTERVAL_MS) {
-        WiFi.disconnect();
-        start_wifi_connection();
-    }
-}
-
-void update_led(unsigned long now) {
-    if (now - last_mode_change_ms >= BLINK_MODE_DURATION_MS) {
-        last_mode_change_ms = now;
-        fast_blink_mode = !fast_blink_mode;
-        Serial.printf("[LED] Mode: %s\n", fast_blink_mode ? "FAST" : "SLOW");
-    }
-
-    const unsigned long interval_ms = fast_blink_mode
-        ? FAST_BLINK_INTERVAL_MS
-        : SLOW_BLINK_INTERVAL_MS;
-
-    if (now - last_led_toggle_ms >= interval_ms) {
-        last_led_toggle_ms = now;
-        led_is_on = !led_is_on;
-        digitalWrite(LED_PIN, led_is_on ? LED_ON : LED_OFF);
-    }
-}
-
-void print_system_log(unsigned long now) {
-    if (now - last_log_ms < LOG_INTERVAL_MS) {
-        return;
-    }
-    last_log_ms = now;
-
-    Serial.println("\n========== ESP32-C3 STATUS ==========");
-    Serial.printf("Chip       : %s rev %d\n", ESP.getChipModel(), ESP.getChipRevision());
-    Serial.printf("CPU        : %u MHz, %u core(s)\n", ESP.getCpuFreqMHz(), ESP.getChipCores());
-    Serial.printf("Flash      : %u bytes (%u MHz)\n", ESP.getFlashChipSize(), ESP.getFlashChipSpeed() / 1000000U);
-    Serial.printf("Heap       : %u free / %u bytes\n", ESP.getFreeHeap(), ESP.getHeapSize());
-    Serial.printf("Min heap   : %u bytes\n", ESP.getMinFreeHeap());
-    Serial.printf("Sketch     : %u bytes, free %u bytes\n", ESP.getSketchSize(), ESP.getFreeSketchSpace());
-    Serial.printf("Uptime     : %lu seconds\n", now / 1000UL);
-    Serial.printf("LED mode   : %s\n", fast_blink_mode ? "FAST (150 ms)" : "SLOW (600 ms)");
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("WiFi       : CONNECTED to %s\n", WiFi.SSID().c_str());
-        Serial.printf("IP         : %s\n", WiFi.localIP().toString().c_str());
-        Serial.printf("RSSI       : %d dBm\n", WiFi.RSSI());
-        Serial.printf("MAC        : %s\n", WiFi.macAddress().c_str());
-    } else {
-        Serial.printf("WiFi       : DISCONNECTED (status %d)\n", static_cast<int>(WiFi.status()));
-    }
-    Serial.println("=====================================\n");
+    Serial.printf("[SERVO] Commanded angle (estimated, not measured): %d deg | %lu us\n", 60 + static_cast<int>(pulse_us - JAW_OPEN_PULSE_US) / 10,
+                  static_cast<unsigned long>(pulse_us));
+    return true;
 }
 }  // namespace
 
 void setup() {
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, LED_OFF);
+    pinMode(SERVO_PIN, OUTPUT);
+    digitalWrite(SERVO_PIN, LOW);
 
+    pinMode(INCREASE_PIN, INPUT_PULLUP);
+    pinMode(DECREASE_PIN, INPUT_PULLUP);
     Serial.begin(115200);
-    const unsigned long serial_wait_start_ms = millis();
-    while (!Serial && millis() - serial_wait_start_ms < 2000) {
-        yield();
-    }
 
-    Serial.println("\n[Boot] ESP32-C3 SuperMini board check");
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
-    start_wifi_connection();
+    ledc_timer_config_t timer = {};
+    timer.speed_mode = LEDC_LOW_SPEED_MODE;
+    timer.duty_resolution = LEDC_TIMER_14_BIT;
+    timer.timer_num = LEDC_TIMER_0;
+    timer.freq_hz = SERVO_FREQUENCY_HZ;
+    timer.clk_cfg = LEDC_AUTO_CLK;
+
+    ledc_channel_config_t channel = {};
+    channel.gpio_num = SERVO_PIN;
+    channel.speed_mode = LEDC_LOW_SPEED_MODE;
+    channel.channel = LEDC_CHANNEL_0;
+    channel.intr_type = LEDC_INTR_DISABLE;
+    channel.timer_sel = LEDC_TIMER_0;
+    channel.duty = (CENTER_PULSE_US * PWM_MAX + 10000UL) / 20000UL;
+    channel.hpoint = 0;
+
+    const esp_err_t timer_result = ledc_timer_config(&timer);
+    const esp_err_t channel_result = timer_result == ESP_OK
+        ? ledc_channel_config(&channel) : timer_result;
+    pwm_ready = channel_result == ESP_OK;
+    if (!pwm_ready) {
+        Serial.printf("[ERROR] PWM setup failed: %d\n", channel_result);
+    }
+    if (pwm_ready) {
+        Serial.println("[START] Center command active: approximately 90 deg (1500 us). Initial move may be fast.");
+        write_pulse();
+    }
+    Serial.printf("[BOOT] Reset reason: %d\n", static_cast<int>(esp_reset_reason()));
 }
 
 void loop() {
+    if (!pwm_ready) {
+        return;
+    }
     const unsigned long now = millis();
-    update_led(now);
-    update_wifi(now);
-    print_system_log(now);
+    const bool increase_edge = increase_button.update(now);
+    const bool decrease_edge = decrease_button.update(now);
+
+    if (increase_button.raw_pressed && decrease_button.raw_pressed) {
+        wait_for_release = true;
+    }
+    if (wait_for_release) {
+        if (!increase_button.raw_pressed && !decrease_button.raw_pressed
+            && !increase_button.pressed && !decrease_button.pressed) {
+            wait_for_release = false;
+        }
+        return;
+    }
+    if (increase_edge == decrease_edge) {
+        return;
+    }
+    Serial.printf("[BUTTON] GPIO%u pressed\n", increase_edge ? INCREASE_PIN : DECREASE_PIN);
+
+    const uint32_t next_pulse_us = static_cast<uint32_t>(constrain(
+        static_cast<int>(pulse_us) + (increase_edge ? STEP_US : -STEP_US),
+        static_cast<int>(JAW_OPEN_PULSE_US), static_cast<int>(JAW_CLOSED_PULSE_US)));
+    if (next_pulse_us == pulse_us) {
+        Serial.println("[LIMIT] End of test range.");
+        return;
+    }
+    pulse_us = next_pulse_us;
+    write_pulse();
 }
