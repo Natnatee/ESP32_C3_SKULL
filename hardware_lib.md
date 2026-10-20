@@ -1,29 +1,42 @@
-# Hardware and Libraries
+# Hardware / Libraries
 
-## Hardware
-- ESP32-C3 SuperMini: logic 3.3V, Native USB CDC
-- MG995 180°: ใช้ทดสอบขยับกราม
-- ปุ่ม momentary normally-open 2 ปุ่ม
-- ถ่านอัลคาไล 4 ก้อนประมาณ 6V
-- HT7333 ลดไฟเป็น 3.3V ให้ ESP32-C3
-- C 1000 µF คร่อมไฟใกล้เซอร์โว ตรวจขั้วและพิกัดแรงดัน
+## อุปกรณ์และ pin map
+| อุปกรณ์ | GPIO / การต่อ | ข้อกำหนด |
+|---|---|---|
+| ESP32-C3 | ไฟเข้า 5V จาก LM2596 | logic 3.3V; ห้ามป้อน 5V เข้าขา 3V3/GPIO |
+| MG995 signal | GPIO4 | PWM 50 Hz; เปิด 1200 / ปิด 1600 / startup 1500 µs |
+| LED แดงซ้าย | GPIO0 → R → anode, cathode → GND | active HIGH, idle ดับ |
+| LED แดงขวา | GPIO1 → R → anode, cathode → GND | R แยกจากดวงซ้าย เลือกตามกระแส LED/พิกัด GPIO |
+| AM312 | OUT → GPIO10, VCC → 3.3V, GND | ไม่มี software warmup; ต้อง LOW ก่อน rising trigger เซ็นเซอร์จริงอาจยังมีช่วงตั้งตัว |
+| DFPlayer RX | GPIO21 (ESP TX) → R 1 kΩ → RX | UART 9600 8N1 |
+| DFPlayer TX | TX → GPIO20 (ESP RX) | ตรวจระดับ logic ก่อนต่อ |
+| DFPlayer BUSY | BUSY → GPIO7 | **จำเป็น**, LOW = playing; ตรวจระดับ logic |
+| ลำโพง | SPK1–SPK2 | ห้ามต่อขั้วลำโพงลง GND |
+| microSD | ช่อง DFPlayer, FAT32 | WAV 14 ไฟล์ลง root |
 
-## Pin map
-| Function | GPIO | Direction | Notes |
-|---|---:|---|---|
-| Servo signal | 4 | Output | PWM 50 Hz, 1000–2000 µs |
-| Increase | 5 | Input pull-up | Active Low, ปุ่มต่อ GND |
-| Decrease | 6 | Input pull-up | Active Low, ปุ่มต่อ GND |
+ตรวจ datasheet และระดับแรงดันของ DFPlayer รุ่นจริง TX/BUSY หากเกิน 3.3V ให้ใช้ voltage divider/วงจรลดระดับก่อนเข้า ESP32; R 1 kΩ สาย ESP TX ไม่ใช่วงจรลดระดับของขารับ ตรวจ silk screen บอร์ดก่อนต่อ หลีกเลี่ยง GPIO8/9 สำหรับ boot และ GPIO18/19 สำหรับ Native USB
 
-ไม่ใช้ GPIO8/9 ซึ่งมีหน้าที่ boot/LED และไม่ใช้ GPIO18/19 ของ Native USB ตรวจ silk screen ของบอร์ดจริงก่อนต่อ
+## ระบบไฟ
+- 18650 สองก้อนอนุกรม **2S** พร้อม BMS 2S ใช้เครื่องชาร์จ Li-ion **8.4V** ที่เหมาะสม BMS ไม่ทดแทนเครื่องชาร์จ
+- ผ่าน LM2596 ตั้งและวัด **5V ก่อนต่อโหลด** แล้วแยกแขนงไป ESP32 **ขา 5V ไม่ใช่ 3V3**, servo และ DFPlayer ต่อ GND ร่วมทั้งหมด; AM312 ใช้ราง 3.3V ของบอร์ด
+- ห้ามต่อแบตเตอรี่ 2S ตรงอุปกรณ์ ตรวจพิกัดเซลล์/BMS/สาย/สวิตช์และป้องกันลัดวงจร MG995 กระแสสูงเมื่อเริ่ม/ติดขัด ต้องตรวจความสามารถจริงและความร้อน LM2596 ไม่ยึดเพียงค่ากระแสโฆษณา
+- สาย servo สั้นและรองรับกระแส ไม่ให้กระแสมอเตอร์ผ่านสายเล็กของ ESP32 ใส่ C 1000 µF ใกล้ servo และ 470–1000 µF + 0.1 µF ใกล้ player ตรวจขั้วและพิกัดแรงดัน C ไม่ชดเชยกระแสต่อเนื่องที่ไม่พอ
+- ห้าม USB พร้อมไฟภายนอก เว้นแต่ตรวจสอบวงจรป้องกัน backfeed/แยกแหล่งจ่ายแล้ว ถอดไฟภายนอกก่อนอัปโหลด USB
 
-## Framework / Libraries
-- PlatformIO `espressif32`, Arduino framework
-- Board ID เดิม `lolin_c3_mini`, เปิด USB CDC ตอน boot
-- `Arduino.h` และ `driver/ledc.h` ที่มากับ framework
-- ไม่ใช้ third-party library, Wi-Fi หรือ secrets
+## ข้อกำหนดการทำงาน
+Boot self-test 10 s เริ่มส่ง 1500 µs แล้วเข้า triangle 1200–1600 µs ทันที 5 รอบ เปิด 1 s/ปิด 1 s ตาทั้งคู่กระพริบทุก 150 ms เฉพาะ PIR GPIO10 HIGH ไม่ยืนยันว่า PIR ปกติเพราะยังอาจตั้งตัว และไม่ใช่ PIR warmup DFPlayer initialize ประมาณ 4 s แล้วเล่นหนึ่ง global track สุ่มเมื่อจำนวน SD พร้อมและ BUSY idle เสียงไม่เริ่มที่วินาที 0 เล่นได้เฉพาะเวลาที่เหลือ ไม่ใช่เต็ม 10 s ครบ 10 s STOP แม้เพลงไม่จบ ดับตา/ปิดกราม รออย่างน้อย 300 ms หลัง STOP และ BUSY idle แล้ว LOW rearm เข้าโหมดปกติโดยไม่มี cooldown หากอ่านจำนวนไฟล์ล้มเหลวเข้า FAULT หยุดเสียง/เอฟเฟกต์ก่อนกำหนด ดับตาและปิดกราม
 
-## Power
-Servo รับไฟแบตเตอรี่โดยตรง ESP32 รับผ่าน HT7333 ต่อ GND ร่วม ใช้สายไฟเซอร์โวสั้นและเหมาะกับกระแส หลีกเลี่ยงให้กระแสมอเตอร์ไหลผ่านสาย GND เล็กของ ESP32
+โหมดปกติ: เมื่อ trigger เริ่มกรามและตาทันทีไม่รอเสียง: ปิด 1600 → เปิด 1200 µs ใน 1 s → ปิด 1600 µs ใน 1 s ซ้ำ 5 รอบ รวม 10 s ไม่มีสุ่มเป้าหมายกราม การเคลื่อนที่จริงครั้งแรกอาจเร็วเพราะไม่ทราบตำแหน่งเดิม เตรียมสวิตช์ตัดไฟเมื่อฝืน/ชน/ร้อน
 
-ตรวจ datasheet HT7333 รุ่นจริงสำหรับแรงดันสูงสุด กระแส ความร้อน และ capacitor ที่จำเป็น ถ่านอัลคาไลอาจแรงดันตกเมื่อ MG995 ออกแรง C 1000 µF ไม่สามารถชดเชยกระแสต่อเนื่องได้ อ่านข้อควรระวัง USB และขั้นตอนตั้งศูนย์ใน README.md
+ระบบเต็มไม่มี PIR warmup ใช้ boot self-test ตามข้างต้นแล้วต้องพบ LOW/HIGH; diagnostic `pir_led_test.cpp` ใช้ GPIO10 แต่ยัง warmup 30 s ตาสุ่มอิสระอย่างสม่ำเสมอ 4 แบบ: ค้าง / สลับ / พร้อมกันช้า / พร้อมกันเร็ว ทำงานตลอด 10 s เดียวกับกราม
+
+เฉพาะโหมดปกติ: เสียงเล่นจนจบตามธรรมชาติ ไม่ตัดที่ 10 s (safety 60 s): เสียงสั้นเอฟเฟกต์ยังทำต่อครบ 10 s; เสียงยาวหลัง 10 s กรามปิด/ตาดับแต่เสียงเล่นต่อ ไม่รับ trigger ซ้อน เริ่ม cooldown 10 s เมื่อทั้งเสียงและเอฟเฟกต์จบ แล้วต้องพบ LOW ก่อน rising trigger ใหม่ หากเสียงไม่เริ่มภายใน 5 s หรือ player error ให้ยกเลิกเอฟเฟกต์ หยุดเสียง ปิดกรามอย่างปลอดภัย ดับตา และเข้า cooldown
+
+## SD / Framework
+- สำรองข้อมูลก่อนฟอร์แมต FAT32 คัดลอก **เนื้อหา `public/sound/` ทั้ง 14 WAV** ลง root คงชื่อและต้นฉบับ ไม่คัดลอกเป็นโฟลเดอร์ `sound` ไม่ใส่เสียงอื่นปะปน
+- ไฟล์จริง WAV PCM 16-bit mono 24 kHz ต้องทดสอบกับ DFPlayer จริง Query `0x48` นับไฟล์ SD เพื่อสุ่ม global index อย่างสม่ำเสมอ เล่นด้วย `0x03`; index ไม่แมปชื่อไฟล์ ไม่มีสุ่มหมวดหมู่
+- Volume เริ่มต้น **30/30 (สูงสุด)** ปรับได้ ระวังเสียงแตก ความร้อนและไฟเลี้ยงตก โดยเฉพาะขณะ servo ทำงาน มีเสียงสุ่มใน boot self-test ไม่มี Wi-Fi
+- PlatformIO `espressif32`, Arduino, board ID เดิม `lolin_c3_mini`; ใช้ `Arduino.h`, ESP-IDF `driver/ledc.h` และ `HardwareSerial` ใน framework ไม่เพิ่ม third-party dependency
+- โค้ดกรามเก่า: `include/jaw_test.cpp.txt` รายละเอียดภาพรวม: `README.md`, `project.md`
+
+เอกสารนี้ไม่ยืนยันผลทดสอบฮาร์ดแวร์ ต้องตรวจ playback/ระดับ logic/กระแส/กลไกจริง full build (`esp32c3`) ผ่านแล้วตามผลที่แจ้งสำหรับ revision ก่อนการแก้ล่าสุด และกำลังรัน final build ซ้ำ ยังไม่ได้อัปโหลดหรือทดสอบฮาร์ดแวร์
